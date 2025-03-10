@@ -264,13 +264,7 @@ def main() -> None:
     # Global error handler to catch all errors
     application.add_error_handler(error_handler)
 
-    # Run polling in a resilient loop
-    while True:
-        try:
-            application.run_polling()
-        except Exception as e:
-            logger.error("Bot crashed, restarting in 5 seconds", exc_info=e)
-            time.sleep(5)
-
+    application.run_polling()
+    
 if __name__ == "__main__":
     main()
