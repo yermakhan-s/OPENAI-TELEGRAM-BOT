@@ -13,6 +13,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+from telegram.constants import ChatAction 
 import html
 from dotenv import load_dotenv
 
@@ -195,8 +196,15 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Sorry, you are not authorized to use this bot.")
         return
 
+    # Start typing indicator
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+
     user_id = update.effective_user.id
     user_text = update.message.text
+
+    # Optionally add a delay for testing purposes (remove in production)
+    # await asyncio.sleep(2)
+
     reply = await process_text_input(user_id, user_text)
     safe_reply = format_reply(reply)
     await update.message.reply_text(safe_reply, parse_mode="HTML")

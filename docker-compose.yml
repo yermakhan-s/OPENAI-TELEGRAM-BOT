@@ -8,7 +8,5 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_ORGANIZATION: ${OPENAI_ORGANIZATION}
       ALLOWED_USER_IDS: ${ALLOWED_USER_IDS}
-    # Mount the .env and user_models.json files so that they persist on the host
     volumes:
-      - ./.env:/app/.env
-      - ./user_models.json:/app/user_models.json
+      - ./:/app
