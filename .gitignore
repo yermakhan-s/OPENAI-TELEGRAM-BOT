@@ -1,0 +1,7 @@
+.env
+venv/
+.venv/
+# Ignore Python cache directories and compiled files
+__pycache__/
+*.py[cod]
+user_models.json
