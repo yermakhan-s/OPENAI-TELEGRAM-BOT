@@ -1,6 +1,5 @@
 import os
 import json
-import time
 import logging
 import re
 import openai
@@ -90,13 +89,12 @@ def format_reply(reply: str) -> str:
     formatted_parts = []
     for i, part in enumerate(parts):
         if i % 2 == 0:
-            # Non-code parts: HTML-escape and process inline code if needed.
+            # Non-code parts: HTML-escape
             formatted_parts.append(html.escape(part))
         else:
-            # Code parts: split into lines and check first line for language specification.
+            # Code parts: remove a potential language spec from the first line
             lines = part.splitlines()
             if lines and re.match(r"^[a-zA-Z0-9]+$", lines[0].strip()):
-                # Drop the first line (language spec)
                 code = "\n".join(lines[1:])
             else:
                 code = part
@@ -129,7 +127,6 @@ async def setmodel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     try:
         models_response = openai.Model.list()
-        # Filter to include only GPT models
         available_models = [
             model["id"] for model in models_response["data"] if model["id"].startswith("gpt-")
         ]
@@ -190,24 +187,51 @@ async def process_text_input(user_id: int, text: str) -> str:
         bot_reply = "Sorry, I encountered an error processing your request."
     return bot_reply
 
+# Global variables for debouncing
+pending_texts = {}  # key: user_id, value: {"text": accumulated_text, "chat_id": chat_id}
+pending_jobs = {}   # key: user_id, value: scheduled job
+WAIT_TIME = 2       # seconds to wait for additional parts
+
+async def process_accumulated_text(context: ContextTypes.DEFAULT_TYPE):
+    """Process the accumulated text for a user after the waiting period."""
+    job_data = context.job.data
+    user_id = job_data["user_id"]
+    chat_id = job_data["chat_id"]
+    entry = pending_texts.pop(user_id, None)
+    if not entry:
+        return
+    text_to_process = entry["text"]
+    reply = await process_text_input(user_id, text_to_process)
+    safe_reply = format_reply(reply)
+    await context.bot.send_message(chat_id=chat_id, text=safe_reply, parse_mode="HTML")
+    pending_jobs.pop(user_id, None)
+
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle incoming text messages as independent prompts."""
+    """Accumulate incoming text messages and process them as one prompt."""
     if not is_user_allowed(update):
         await update.message.reply_text("Sorry, you are not authorized to use this bot.")
         return
 
-    # Start typing indicator
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-
     user_id = update.effective_user.id
-    user_text = update.message.text
+    chat_id = update.effective_chat.id
+    new_text = update.message.text
 
-    # Optionally add a delay for testing purposes (remove in production)
-    # await asyncio.sleep(2)
+    # Accumulate text parts from the same user
+    if user_id in pending_texts:
+        pending_texts[user_id]["text"] += "\n" + new_text
+    else:
+        pending_texts[user_id] = {"text": new_text, "chat_id": chat_id}
 
-    reply = await process_text_input(user_id, user_text)
-    safe_reply = format_reply(reply)
-    await update.message.reply_text(safe_reply, parse_mode="HTML")
+    # Cancel any previously scheduled job for this user
+    if user_id in pending_jobs:
+        pending_jobs[user_id].schedule_removal()
+
+    # Schedule a new job to process the accumulated text after WAIT_TIME seconds
+    job_data = {"user_id": user_id, "chat_id": chat_id}
+    pending_jobs[user_id] = context.job_queue.run_once(process_accumulated_text, WAIT_TIME, data=job_data)
+
+    # Optionally, send a typing action
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle documents (assumed to be text files) as independent prompts."""
