@@ -16,6 +16,11 @@ from telegram.constants import ChatAction
 import html
 from dotenv import load_dotenv
 
+# Import your Redis client helper
+from redis_client import get_redis_client
+
+cache = get_redis_client()
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -169,7 +174,10 @@ async def whichmodel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(f"Your current model is: {model}")
 
 async def process_text_input(user_id: int, text: str) -> str:
-    """Send a single prompt to OpenAI using a fresh system prompt and the user's input."""
+    """
+    Send a single prompt to OpenAI using a fresh system prompt
+    and the user's aggregated input.
+    """
     model = selected_models.get(str(user_id), "gpt-3.5-turbo")
     logger.info(f"User {user_id} using model: {model}")
     messages = [
@@ -187,54 +195,91 @@ async def process_text_input(user_id: int, text: str) -> str:
         bot_reply = "Sorry, I encountered an error processing your request."
     return bot_reply
 
-# Global variables for debouncing
-pending_texts = {}  # key: user_id, value: {"text": accumulated_text, "chat_id": chat_id}
-pending_jobs = {}   # key: user_id, value: scheduled job
-WAIT_TIME = 2       # seconds to wait for additional parts
+#
+# Debouncing logic
+#
+user_jobs = {}  # key: user_id, value: scheduled job for debouncing
 
-async def process_accumulated_text(context: ContextTypes.DEFAULT_TYPE):
-    """Process the accumulated text for a user after the waiting period."""
+async def process_aggregated_text(context: ContextTypes.DEFAULT_TYPE):
+    """
+    This function is triggered after 5 seconds of inactivity from the user.
+    It retrieves all accumulated text from Redis, sends it to OpenAI,
+    then clears the Redis key.
+    """
     job_data = context.job.data
     user_id = job_data["user_id"]
     chat_id = job_data["chat_id"]
-    entry = pending_texts.pop(user_id, None)
-    if not entry:
+
+    # Retrieve and delete the user's pending text
+    redis_key = f"pending_text:{user_id}"
+    accumulated_text = cache.get(redis_key)
+    if accumulated_text is None:
+        # Nothing to process
         return
-    text_to_process = entry["text"]
-    reply = await process_text_input(user_id, text_to_process)
+
+    # Convert from bytes to string if needed
+    if isinstance(accumulated_text, bytes):
+        accumulated_text = accumulated_text.decode("utf-8")
+
+    # Clear Redis key
+    cache.delete(redis_key)
+
+    # Remove the job from our dictionary
+    if user_id in user_jobs:
+        del user_jobs[user_id]
+
+    # Send to OpenAI and post the reply
+    reply = await process_text_input(user_id, accumulated_text)
     safe_reply = format_reply(reply)
+
     await context.bot.send_message(chat_id=chat_id, text=safe_reply, parse_mode="HTML")
-    pending_jobs.pop(user_id, None)
+
 
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Accumulate incoming text messages and process them as one prompt."""
+    """
+    Debouncing logic for text messages that are not commands:
+      1. Cancel any existing job for the user.
+      2. Append the new message to Redis.
+      3. Schedule a new job to run after 5 seconds.
+    """
     if not is_user_allowed(update):
         await update.message.reply_text("Sorry, you are not authorized to use this bot.")
         return
 
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    new_text = update.message.text
+    text = update.message.text
 
-    # Accumulate text parts from the same user
-    if user_id in pending_texts:
-        pending_texts[user_id]["text"] += "\n" + new_text
-    else:
-        pending_texts[user_id] = {"text": new_text, "chat_id": chat_id}
-
-    # Cancel any previously scheduled job for this user
-    if user_id in pending_jobs:
-        pending_jobs[user_id].schedule_removal()
-
-    # Schedule a new job to process the accumulated text after WAIT_TIME seconds
-    job_data = {"user_id": user_id, "chat_id": chat_id}
-    pending_jobs[user_id] = context.job_queue.run_once(process_accumulated_text, WAIT_TIME, data=job_data)
-
-    # Optionally, send a typing action
+    # Optionally, send a typing action while storing
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
+    # 1. Cancel any existing debouncing job
+    if user_id in user_jobs:
+        user_jobs[user_id].schedule_removal()
+
+    # 2. Append this message to existing text in Redis
+    redis_key = f"pending_text:{user_id}"
+    existing_text = cache.get(redis_key)
+    if existing_text is None:
+        existing_text = ""
+    elif isinstance(existing_text, bytes):
+        existing_text = existing_text.decode("utf-8")
+
+    # Aggregate
+    if existing_text:
+        new_text = existing_text + "\n" + text
+    else:
+        new_text = text
+
+    cache.set(redis_key, new_text)
+
+    # 3. Schedule a new job in 5 seconds
+    job_data = {"user_id": user_id, "chat_id": chat_id}
+    job = context.job_queue.run_once(process_aggregated_text, 5, data=job_data)
+    user_jobs[user_id] = job
+
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle documents (assumed to be text files) as independent prompts."""
+    """Handle documents (assumed to be text files) as independent prompts, bypassing debouncing."""
     if not is_user_allowed(update):
         await update.message.reply_text("Sorry, you are not authorized to use this bot.")
         return
@@ -258,6 +303,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("Failed to read the file as text.")
         return
 
+    # Directly send to OpenAI without debouncing
     reply = await process_text_input(user_id, file_text)
     safe_reply = format_reply(reply)
     await update.message.reply_text(safe_reply, parse_mode="HTML")
@@ -275,13 +321,15 @@ def main() -> None:
     """Run the Telegram bot with error handling and crash resilience."""
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Command handlers
+    # Command handlers (bypass debouncing)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("setmodel", setmodel))
     application.add_handler(CommandHandler("whichmodel", whichmodel))
     application.add_handler(CallbackQueryHandler(set_model_callback, pattern=r"^setmodel\|"))
     
-    # Message handlers for text messages and documents
+    # Message handlers: 
+    #  - Text messages that are NOT commands -> use debouncing
+    #  - Documents -> handled separately (no debouncing)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     

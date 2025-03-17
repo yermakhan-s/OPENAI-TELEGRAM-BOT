@@ -1,0 +1,6 @@
+# Exclude local virtual environment
+venv/
+
+# Exclude git repository files
+.git/
+.gitignore
