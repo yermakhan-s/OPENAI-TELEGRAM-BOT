@@ -5,3 +5,4 @@ venv/
 __pycache__/
 *.py[cod]
 user_models.json
+unauthorized_users.txt

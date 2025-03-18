@@ -77,10 +77,33 @@ def save_selected_models(models):
 # Load the persisted models into selected_models dict
 selected_models = load_selected_models()
 
+UNAUTHORIZED_USERS_FILE = "unauthorized_users.txt"
+
+def store_unauthorized_user(user) -> None:
+    """
+    Append minimal user data (id, first_name, last_name, username)
+    to a plain text file, one line per user.
+    """
+    user_id = user.id
+    first_name = user.first_name or ""
+    last_name = user.last_name or ""
+    username = user.username or ""
+
+    line = f"{user_id}, {first_name}, {last_name}, {username}\n"
+
+    try:
+        with open(UNAUTHORIZED_USERS_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception as e:
+        logger.error(f"Error writing to {UNAUTHORIZED_USERS_FILE}: {e}")
+
 def is_user_allowed(update: Update) -> bool:
-    """Return True if the user is allowed to use the bot."""
-    user_id = update.effective_user.id
+    """Return True if the user is allowed to use the bot; otherwise store in txt and return False."""
+    user = update.effective_user
+    user_id = user.id
+    
     if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        store_unauthorized_user(user)
         return False
     return True
 
