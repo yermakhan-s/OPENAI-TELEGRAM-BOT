@@ -33,7 +33,7 @@ services:
     image: redis:latest
     restart: always
     ports:
-      - "6379:6379"   # Optional: expose port if you need external access
+      - "6380:6379"   # Optional: expose port if you need external access
     volumes:
       - redis-data:/data
 
